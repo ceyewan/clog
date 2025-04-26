@@ -1,292 +1,562 @@
-package clog
+// Package logger 提供一个灵活的日志系统，基于 uber-go/zap
+// 支持结构化日志和人类友好的输出格式
+package logger
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// 日志级别
-type LogLevel int
-
+// 定义日志级别常量
 const (
-	LevelDebug LogLevel = iota
-	LevelInfo
-	LevelWarning
-	LevelError
+	DebugLevel = "debug"
+	InfoLevel  = "info"
+	WarnLevel  = "warn"
+	ErrorLevel = "error"
+	PanicLevel = "panic"
+	FatalLevel = "fatal"
 )
 
-// ============================
-// 公开 API 接口
-// ============================
-
-// Debug 记录 Debug 级别日志
-func Debug(format string, args ...interface{}) {
-	defaultLogger.log(LevelDebug, format, args...)
-}
-
-// Info 记录 Info 级别日志
-func Info(format string, args ...interface{}) {
-	defaultLogger.log(LevelInfo, format, args...)
-}
-
-// Warning 记录 Warning 级别日志
-func Warning(format string, args ...interface{}) {
-	defaultLogger.log(LevelWarning, format, args...)
-}
-
-// Error 记录 Error 级别日志
-func Error(format string, args ...interface{}) {
-	defaultLogger.log(LevelError, format, args...)
-}
-
-// SetLogPath 设置日志输出路径
-// 如果路径为空，则只输出到控制台
-// 否则输出内容到指定文件
-func SetLogPath(logDir string) error {
-	if logDir == "" {
-		defaultLogger.setTarget(LogToConsole)
-		return nil
-	}
-
-	// 确保日志目录存在
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("创建日志目录失败: %v", err)
-	}
-
-	defaultLogger.mu.Lock()
-	defaultLogger.logDir = logDir
-	defaultLogger.mu.Unlock()
-	defaultLogger.setTarget(LogToFile)
-
-	return nil
-}
-
-// SetLogLevel 设置日志级别
-// 只输出大于等于该级别的日志
-func SetLogLevel(level LogLevel) {
-	defaultLogger.setLevel(level)
-}
-
-// Close 关闭日志系统，释放资源
-func Close() error {
-	return defaultLogger.close()
-}
-
-// ============================
-// 内部实现
-// ============================
-
-// 日志输出目标
-type logTarget int
-
+// 定义日志输出格式
 const (
-	LogToConsole logTarget = 1 << iota
-	LogToFile
-	LogToBoth = LogToConsole | LogToFile
+	FormatJSON    = "json"    // JSON格式，适合生产环境
+	FormatConsole = "console" // 控制台友好格式，适合开发环境
 )
 
-// 日志级别对应的颜色
-var levelColors = map[LogLevel]string{
-	LevelDebug:   "\033[36m", // 青色
-	LevelInfo:    "\033[32m", // 绿色
-	LevelWarning: "\033[33m", // 黄色
-	LevelError:   "\033[31m", // 红色
+// Config 定义日志配置
+type Config struct {
+	// 日志级别 (debug, info, warn, error, panic, fatal)
+	Level string `json:"level"`
+	// 日志格式: json, console
+	Format string `json:"format"`
+	// 日志文件路径
+	Filename string `json:"filename"`
+	// 是否输出到控制台
+	ConsoleOutput bool `json:"console_output"`
+	// 是否记录调用者信息
+	EnableCaller bool `json:"enable_caller"`
+	// 是否启用颜色（控制台格式时有效）
+	EnableColor bool `json:"enable_color"`
+	// 文件轮转配置
+	FileRotation *FileRotationConfig `json:"file_rotation"`
 }
 
-// 日志级别名称，使用固定宽度
-var levelNames = map[LogLevel]string{
-	LevelDebug:   "DEBUG  ",
-	LevelInfo:    "INFO   ",
-	LevelWarning: "WARNING",
-	LevelError:   "ERROR  ",
+// FileRotationConfig 定义日志文件轮转设置
+type FileRotationConfig struct {
+	// 单个日志文件最大尺寸，单位MB
+	MaxSize int `json:"max_size"`
+	// 最多保留文件个数
+	MaxBackups int `json:"max_backups"`
+	// 日志保留天数
+	MaxAge int `json:"max_age"`
+	// 是否压缩轮转文件
+	Compress bool `json:"compress"`
 }
 
-// Logger 结构体
-type logger struct {
-	consoleLogger *log.Logger
-	fileLogger    *log.Logger
-	level         LogLevel
-	target        logTarget
-	mu            sync.Mutex
-	fileWriter    io.WriteCloser
+// DefaultConfig 返回默认配置
+func DefaultConfig() Config {
+	return Config{
+		Level:         InfoLevel,
+		Format:        FormatConsole,
+		Filename:      "./logs/app.log",
+		ConsoleOutput: true,
+		EnableCaller:  true,
+		EnableColor:   true,
+		FileRotation: &FileRotationConfig{
+			MaxSize:    100,
+			MaxAge:     7,
+			MaxBackups: 10,
+			Compress:   false,
+		},
+	}
+}
 
-	// 日志按日期分割所需的字段
-	logDir      string // 日志目录
-	currentDate string // 当前日志对应的日期
+// Logger 封装 zap 日志功能
+type Logger struct {
+	zap         *zap.Logger
+	sugar       *zap.SugaredLogger
+	config      Config
+	atomicLevel zap.AtomicLevel
+	rotator     *lumberjack.Logger
 }
 
 // 全局默认日志实例
-var defaultLogger *logger
+var defaultLogger *Logger
 
-func init() {
-	// 初始化默认日志实例，默认输出到控制台
-	defaultLogger = newLogger("", LevelInfo, LogToConsole)
+// parseLevel 将字符串级别转换为 zapcore.Level
+func parseLevel(level string) zapcore.Level {
+	switch strings.ToLower(level) {
+	case DebugLevel:
+		return zapcore.DebugLevel
+	case InfoLevel:
+		return zapcore.InfoLevel
+	case WarnLevel:
+		return zapcore.WarnLevel
+	case ErrorLevel:
+		return zapcore.ErrorLevel
+	case PanicLevel:
+		return zapcore.PanicLevel
+	case FatalLevel:
+		return zapcore.FatalLevel
+	default:
+		return zapcore.InfoLevel
+	}
 }
 
-// newLogger 创建一个新的 Logger 实例
-func newLogger(logDir string, level LogLevel, target logTarget) *logger {
-	logger := &logger{
-		level:  level,
-		target: target,
-		logDir: logDir,
-	}
-
-	if target&LogToConsole != 0 {
-		logger.consoleLogger = log.New(os.Stdout, "", 0)
-	}
-
-	if target&LogToFile != 0 && logDir != "" {
-		// 确保日志目录存在
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			log.Printf("Failed to create log directory: %v", err)
-			// 回退到只使用控制台
-			logger.target = LogToConsole
-		} else {
-			// 初始化日志文件
-			if err := logger.rotateLogFile(); err != nil {
-				log.Printf("Failed to initialize log file: %v", err)
-				// 回退到只使用控制台
-				logger.target = LogToConsole
-			}
-		}
-	}
-
-	return logger
-}
-
-func (l *logger) rotateLogFile() error {
-	// 如果未设置日志目录，则不输出到文件
-	if l.logDir == "" {
-		return nil
-	}
-
-	// 获取当前日期
-	today := time.Now().Format("2006-01-02")
-	// 如果日期没变且已有文件句柄，则不需要切换
-	if today == l.currentDate && l.fileWriter != nil {
-		return nil
-	}
-	// 关闭之前的文件
-	if l.fileWriter != nil {
-		l.fileWriter.Close()
-		l.fileWriter = nil
-		l.fileLogger = nil
-	}
-	// 生成当天的日志文件路径
-	filename := fmt.Sprintf("log-%s.log", today)
-	logPath := filepath.Join(l.logDir, filename)
-	// 打开或创建日志文件
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+// Init 初始化默认日志器
+func Init(config Config) error {
+	logger, err := NewLogger(config)
 	if err != nil {
-		return fmt.Errorf("failed to open log file %s: %v", logPath, err)
+		return err
 	}
-	// 更新Logger状态
-	l.fileLogger = log.New(file, "", 0)
-	l.fileWriter = file
-	l.currentDate = today
+	defaultLogger = logger
 	return nil
 }
 
-// close 关闭日志文件
-func (l *logger) close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.fileWriter != nil {
-		return l.fileWriter.Close()
+// NewLogger 创建新的日志器实例
+func NewLogger(config Config) (*Logger, error) {
+	// 使用默认配置填充未设置的值
+	defaultCfg := DefaultConfig()
+	if config.Level == "" {
+		config.Level = defaultCfg.Level
 	}
-	return nil
-}
-
-// setTarget 设置日志输出目标
-func (l *logger) setTarget(target logTarget) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.target = target
-}
-
-// setLevel 设置日志级别
-func (l *logger) setLevel(level LogLevel) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.level = level
-}
-
-// log 内部日志方法
-func (l *logger) log(level LogLevel, format string, args ...interface{}) {
-	// 快速检查日志级别
-	if level < l.level {
-		return
+	if config.Format == "" {
+		config.Format = defaultCfg.Format
 	}
-
-	// 获取调用者的文件名和行号
-	_, file, line, ok := runtime.Caller(2)
-	if !ok {
-		file = "unknown"
-		line = 0
+	if config.Filename == "" {
+		config.Filename = defaultCfg.Filename
+	}
+	if config.FileRotation == nil {
+		config.FileRotation = defaultCfg.FileRotation
 	} else {
-		// 只保留文件名
-		file = file[strings.LastIndex(file, "/")+1:]
-	}
-
-	// 对齐长度，方便查看
-	fileInfo := fmt.Sprintf("%s:%d", file, line)
-	if len(fileInfo) < 15 {
-		fileInfo = fmt.Sprintf("%-15s", fileInfo)
-	}
-
-	// 格式化日志内容
-	message := fmt.Sprintf(format, args...)
-	timestamp := timeNow()
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	// 同步处理控制台输出
-	if l.target&LogToConsole != 0 && l.consoleLogger != nil {
-		// 控制台日志（带颜色）
-		consoleLogEntry := fmt.Sprintf(
-			"%s[%s]\033[0m \033[90m%s %s\033[0m %s",
-			levelColors[level],
-			levelNames[level],
-			timestamp,
-			fileInfo,
-			message,
-		)
-		l.consoleLogger.Println(consoleLogEntry)
-	}
-
-	// 同步处理文件输出
-	if l.target&LogToFile != 0 {
-		// 检查是否需要切换日志文件
-		if err := l.rotateLogFile(); err != nil {
-			// 如果切换失败，记录错误到控制台
-			if l.consoleLogger != nil {
-				l.consoleLogger.Printf("切换日志文件失败: %v", err)
-			}
-		} else if l.fileLogger != nil {
-			// 文件日志（不带颜色）
-			fileLogEntry := fmt.Sprintf(
-				"[%s] %s %s %s",
-				levelNames[level],
-				timestamp,
-				fileInfo,
-				message,
-			)
-			// 写入日志到文件
-			l.fileLogger.Println(fileLogEntry)
+		if config.FileRotation.MaxSize <= 0 {
+			config.FileRotation.MaxSize = defaultCfg.FileRotation.MaxSize
+		}
+		if config.FileRotation.MaxAge <= 0 {
+			config.FileRotation.MaxAge = defaultCfg.FileRotation.MaxAge
+		}
+		if config.FileRotation.MaxBackups <= 0 {
+			config.FileRotation.MaxBackups = defaultCfg.FileRotation.MaxBackups
 		}
 	}
+
+	// 创建原子级别用于动态级别变更
+	atomicLevel := zap.NewAtomicLevel()
+	atomicLevel.SetLevel(parseLevel(config.Level))
+
+	// 设置编码器配置
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+
+	// 配置人类友好输出
+	if config.Format == FormatConsole && config.EnableColor {
+		encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	}
+
+	// 自定义时间格式
+	encoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendString(t.Format("2006-01-02 15:04:05"))
+	}
+
+	// 设置日志输出
+	var writer zapcore.WriteSyncer
+
+	// 确保日志目录存在
+	dir := filepath.Dir(config.Filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("创建日志目录失败: %v", err)
+	}
+
+	// 设置 lumberjack 进行日志轮转
+	rotator := &lumberjack.Logger{
+		Filename:   config.Filename,
+		MaxSize:    config.FileRotation.MaxSize,
+		MaxBackups: config.FileRotation.MaxBackups,
+		MaxAge:     config.FileRotation.MaxAge,
+		Compress:   config.FileRotation.Compress,
+	}
+	writer = zapcore.AddSync(rotator)
+
+	// 添加控制台输出
+	if config.ConsoleOutput {
+		writer = zapcore.NewMultiWriteSyncer(writer, zapcore.AddSync(os.Stdout))
+	}
+
+	// 根据配置选择编码器
+	var encoder zapcore.Encoder
+	if config.Format == FormatJSON {
+		encoder = zapcore.NewJSONEncoder(encoderConfig)
+	} else {
+		encoder = zapcore.NewConsoleEncoder(encoderConfig)
+	}
+
+	// 创建核心
+	core := zapcore.NewCore(encoder, writer, atomicLevel)
+
+	// 创建 zap 日志器
+	var zapLogger *zap.Logger
+	if config.EnableCaller {
+		zapLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	} else {
+		zapLogger = zap.New(core)
+	}
+
+	logger := &Logger{
+		zap:         zapLogger,
+		sugar:       zapLogger.Sugar(),
+		config:      config,
+		atomicLevel: atomicLevel,
+		rotator:     rotator,
+	}
+
+	return logger, nil
 }
 
-// timeNow 返回当前时间的格式化字符串
-func timeNow() string {
-	return time.Now().Format("2006-01-02 15:04:05")
+// SetLevel 动态更改日志级别
+func (l *Logger) SetLevel(level string) {
+	l.atomicLevel.SetLevel(parseLevel(level))
+}
+
+// With 添加结构化上下文到日志器
+func (l *Logger) With(fields ...zapcore.Field) *Logger {
+	newZap := l.zap.With(fields...)
+	return &Logger{
+		zap:         newZap,
+		sugar:       newZap.Sugar(),
+		config:      l.config,
+		atomicLevel: l.atomicLevel,
+		rotator:     l.rotator,
+	}
+}
+
+// WithFields 使用键值对添加结构化上下文到日志器
+func (l *Logger) WithFields(fields map[string]interface{}) *Logger {
+	var zapFields []zap.Field
+	for k, v := range fields {
+		zapFields = append(zapFields, zap.Any(k, v))
+	}
+	return l.With(zapFields...)
+}
+
+// 添加源代码上下文（文件，行）
+func addSourceContext(fields []zapcore.Field) []zapcore.Field {
+	_, file, line, ok := runtime.Caller(2)
+	if ok {
+		// 从完整路径中获取文件名
+		_, filename := filepath.Split(file)
+		sourceInfo := fmt.Sprintf("%s:%d", filename, line)
+
+		// 添加源代码上下文作为字段
+		fields = append(fields, zap.String("source", sourceInfo))
+	}
+	return fields
+}
+
+// Debug 在 debug 级别记录消息
+func (l *Logger) Debug(msg string, fields ...zapcore.Field) {
+	l.zap.Debug(msg, fields...)
+}
+
+// Info 在 info 级别记录消息
+func (l *Logger) Info(msg string, fields ...zapcore.Field) {
+	l.zap.Info(msg, fields...)
+}
+
+// Warn 在 warn 级别记录消息
+func (l *Logger) Warn(msg string, fields ...zapcore.Field) {
+	l.zap.Warn(msg, fields...)
+}
+
+// Error 在 error 级别记录消息
+func (l *Logger) Error(msg string, fields ...zapcore.Field) {
+	l.zap.Error(msg, fields...)
+}
+
+// Panic 在 panic 级别记录消息然后触发 panic
+func (l *Logger) Panic(msg string, fields ...zapcore.Field) {
+	l.zap.Panic(msg, fields...)
+}
+
+// Fatal 在 fatal 级别记录消息然后调用 os.Exit(1)
+func (l *Logger) Fatal(msg string, fields ...zapcore.Field) {
+	l.zap.Fatal(msg, fields...)
+}
+
+// Debugf 记录格式化的 debug 级别消息
+func (l *Logger) Debugf(format string, args ...interface{}) {
+	l.sugar.Debugf(format, args...)
+}
+
+// Infof 记录格式化的 info 级别消息
+func (l *Logger) Infof(format string, args ...interface{}) {
+	l.sugar.Infof(format, args...)
+}
+
+// Warnf 记录格式化的 warn 级别消息
+func (l *Logger) Warnf(format string, args ...interface{}) {
+	l.sugar.Warnf(format, args...)
+}
+
+// Errorf 记录格式化的 error 级别消息
+func (l *Logger) Errorf(format string, args ...interface{}) {
+	l.sugar.Errorf(format, args...)
+}
+
+// Panicf 记录格式化的 panic 级别消息然后触发 panic
+func (l *Logger) Panicf(format string, args ...interface{}) {
+	l.sugar.Panicf(format, args...)
+}
+
+// Fatalf 记录格式化的 fatal 级别消息然后调用 os.Exit(1)
+func (l *Logger) Fatalf(format string, args ...interface{}) {
+	l.sugar.Fatalf(format, args...)
+}
+
+// Sync 刷新任何缓冲的日志条目
+func (l *Logger) Sync() error {
+	return l.zap.Sync()
+}
+
+// Close 正确关闭日志器
+func (l *Logger) Close() error {
+	return l.Sync()
+}
+
+// GetZapLogger 获取底层的 zap.Logger
+func (l *Logger) GetZapLogger() *zap.Logger {
+	return l.zap
+}
+
+// GetSugarLogger 获取底层的 zap.SugaredLogger
+func (l *Logger) GetSugarLogger() *zap.SugaredLogger {
+	return l.sugar
+}
+
+// 全局便捷函数，使用默认日志器
+
+// SetDefaultLevel 设置默认日志器的级别
+func SetDefaultLevel(level string) {
+	if defaultLogger != nil {
+		defaultLogger.SetLevel(level)
+	}
+}
+
+// Debug 使用默认日志器记录 debug 级别消息
+func Debug(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Debug(msg, fields...)
+	}
+}
+
+// Info 使用默认日志器记录 info 级别消息
+func Info(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Info(msg, fields...)
+	}
+}
+
+// Warn 使用默认日志器记录 warn 级别消息
+func Warn(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Warn(msg, fields...)
+	}
+}
+
+// Error 使用默认日志器记录 error 级别消息
+func Error(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Error(msg, fields...)
+	}
+}
+
+// Panic 使用默认日志器记录 panic 级别消息然后触发 panic
+func Panic(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Panic(msg, fields...)
+	}
+}
+
+// Fatal 使用默认日志器记录 fatal 级别消息然后退出
+func Fatal(msg string, fields ...zapcore.Field) {
+	if defaultLogger != nil {
+		defaultLogger.Fatal(msg, fields...)
+	}
+}
+
+// Debugf 使用默认日志器记录格式化的 debug 级别消息
+func Debugf(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Debugf(format, args...)
+	}
+}
+
+// Infof 使用默认日志器记录格式化的 info 级别消息
+func Infof(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Infof(format, args...)
+	}
+}
+
+// Warnf 使用默认日志器记录格式化的 warn 级别消息
+func Warnf(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Warnf(format, args...)
+	}
+}
+
+// Errorf 使用默认日志器记录格式化的 error 级别消息
+func Errorf(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Errorf(format, args...)
+	}
+}
+
+// Panicf 使用默认日志器记录格式化的 panic 级别消息然后触发 panic
+func Panicf(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Panicf(format, args...)
+	}
+}
+
+// Fatalf 使用默认日志器记录格式化的 fatal 级别消息然后退出
+func Fatalf(format string, args ...interface{}) {
+	if defaultLogger != nil {
+		defaultLogger.Fatalf(format, args...)
+	}
+}
+
+// With 添加结构化上下文到默认日志器
+func With(fields ...zapcore.Field) *Logger {
+	if defaultLogger != nil {
+		return defaultLogger.With(fields...)
+	}
+	return nil
+}
+
+// WithFields 使用键值对添加结构化上下文到默认日志器
+func WithFields(fields map[string]interface{}) *Logger {
+	if defaultLogger != nil {
+		return defaultLogger.WithFields(fields)
+	}
+	return nil
+}
+
+// Sync 刷新默认日志器中任何缓冲的日志条目
+func Sync() error {
+	if defaultLogger != nil {
+		return defaultLogger.Sync()
+	}
+	return nil
+}
+
+// Field 代表一个日志字段
+type Field = zap.Field
+
+// 提供常用字段类型的创建函数
+var (
+	String   = zap.String
+	Int      = zap.Int
+	Int64    = zap.Int64
+	Float64  = zap.Float64
+	Bool     = zap.Bool
+	Any      = zap.Any
+	Err      = zap.Error
+	Time     = zap.Time
+	Duration = zap.Duration
+)
+
+// TracedLogger 带跟踪ID的日志接口
+type TracedLogger struct {
+	traceID string
+	logger  *Logger
+}
+
+// NewTracedLogger 创建带跟踪ID的日志器
+func NewTracedLogger(traceID string) *TracedLogger {
+	if defaultLogger == nil {
+		return nil
+	}
+	return &TracedLogger{
+		traceID: traceID,
+		logger:  defaultLogger.With(zap.String("trace_id", traceID)),
+	}
+}
+
+// Debug 输出带跟踪ID的Debug级别日志
+func (t *TracedLogger) Debug(msg string, fields ...Field) {
+	t.logger.Debug(msg, fields...)
+}
+
+// Info 输出带跟踪ID的Info级别日志
+func (t *TracedLogger) Info(msg string, fields ...Field) {
+	t.logger.Info(msg, fields...)
+}
+
+// Warn 输出带跟踪ID的Warn级别日志
+func (t *TracedLogger) Warn(msg string, fields ...Field) {
+	t.logger.Warn(msg, fields...)
+}
+
+// Error 输出带跟踪ID的Error级别日志
+func (t *TracedLogger) Error(msg string, fields ...Field) {
+	t.logger.Error(msg, fields...)
+}
+
+// Panic 输出带跟踪ID的Panic级别日志
+func (t *TracedLogger) Panic(msg string, fields ...Field) {
+	t.logger.Panic(msg, fields...)
+}
+
+// Fatal 输出带跟踪ID的Fatal级别日志
+func (t *TracedLogger) Fatal(msg string, fields ...Field) {
+	t.logger.Fatal(msg, fields...)
+}
+
+// Debugf 输出带跟踪ID的格式化Debug级别日志
+func (t *TracedLogger) Debugf(format string, args ...interface{}) {
+	t.logger.Debugf(format, args...)
+}
+
+// Infof 输出带跟踪ID的格式化Info级别日志
+func (t *TracedLogger) Infof(format string, args ...interface{}) {
+	t.logger.Infof(format, args...)
+}
+
+// Warnf 输出带跟踪ID的格式化Warn级别日志
+func (t *TracedLogger) Warnf(format string, args ...interface{}) {
+	t.logger.Warnf(format, args...)
+}
+
+// Errorf 输出带跟踪ID的格式化Error级别日志
+func (t *TracedLogger) Errorf(format string, args ...interface{}) {
+	t.logger.Errorf(format, args...)
+}
+
+// Panicf 输出带跟踪ID的格式化Panic级别日志
+func (t *TracedLogger) Panicf(format string, args ...interface{}) {
+	t.logger.Panicf(format, args...)
+}
+
+// Fatalf 输出带跟踪ID的格式化Fatal级别日志
+func (t *TracedLogger) Fatalf(format string, args ...interface{}) {
+	t.logger.Fatalf(format, args...)
 }
