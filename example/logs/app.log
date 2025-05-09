@@ -1,0 +1,22 @@
+2025-05-09 20:24:29.145	INFO	default	example/main.go:24	程序启动
+2025-05-09 20:24:29.146	WARN	default	example/main.go:26	这是一条警告信息
+2025-05-09 20:24:29.146	INFO	default	example/main.go:29	用户登录	{"username": "admin", "user_id": 1001, "is_admin": true, "login_time": "2025-05-09 20:24:29.146"}
+2025-05-09 20:24:29.146	INFO	default	example/main.go:37	处理了 100 个请求，耗时 0.12 秒
+2025-05-09 20:24:29.146	ERROR	default	example/main.go:41	操作失败	{"error": "数据库连接失败"}
+2025-05-09 20:24:29.146	INFO	default	runtime/proc.go:283	开始处理请求	{"request_id": "req-12345", "client_ip": "192.168.1.1"}
+2025-05-09 20:24:29.146	INFO	default	runtime/proc.go:283	请求处理完成	{"request_id": "req-12345", "client_ip": "192.168.1.1", "status": 200}
+2025-05-09 20:24:29.147	INFO	default	example/main.go:67	当前日志级别为 INFO
+2025-05-09 20:24:29.147	INFO	default	example/main.go:71	日志级别已改为 DEBUG
+2025-05-09 20:24:29.147	DEBUG	default	example/main.go:72	这条调试日志现在可以看到了
+2025-05-09 20:24:29.147	INFO	default	example/main.go:74	程序运行完毕
+2025-05-09 20:41:36.796	INFO	example/main.go:24	程序启动
+2025-05-09 20:41:36.797	WARN	example/main.go:26	这是一条警告信息
+2025-05-09 20:41:36.797	INFO	example/main.go:29	用户登录	{"username": "admin", "user_id": 1001, "is_admin": true, "login_time": "2025-05-09 20:41:36.797"}
+2025-05-09 20:41:36.797	INFO	example/main.go:37	处理了 100 个请求，耗时 0.12 秒
+2025-05-09 20:41:36.797	ERROR	example/main.go:41	操作失败	{"error": "数据库连接失败"}
+2025-05-09 20:41:36.797	INFO	runtime/proc.go:283	开始处理请求	{"request_id": "req-12345", "client_ip": "192.168.1.1"}
+2025-05-09 20:41:36.797	INFO	runtime/proc.go:283	请求处理完成	{"request_id": "req-12345", "client_ip": "192.168.1.1", "status": 200}
+2025-05-09 20:41:36.798	INFO	example/main.go:67	当前日志级别为 INFO
+2025-05-09 20:41:36.798	INFO	example/main.go:71	日志级别已改为 DEBUG
+2025-05-09 20:41:36.798	DEBUG	example/main.go:72	这条调试日志现在可以看到了
+2025-05-09 20:41:36.798	INFO	example/main.go:74	程序运行完毕
