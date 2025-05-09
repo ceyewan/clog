@@ -1,140 +1,239 @@
-# Clog - 高性能结构化日志库
+# clog - 灵活强大的Go日志库
 
-Clog 是一个基于 [uber-go/zap](https://github.com/uber-go/zap) 构建的高性能、灵活的结构化日志库，专为 Go 应用程序设计。它提供了简洁的 API，同时支持结构化日志和人类友好的输出格式。
+`clog`是一个基于[zap](https://github.com/uber-go/zap)和[lumberjack](https://github.com/natefinch/lumberjack)的高性能日志库，提供了多环境支持、结构化日志、多日志器管理和日志文件轮转等功能。
 
-## 核心特性
+## 特性
 
-- **高性能**：基于 zap 的高性能日志引擎，专为生产环境优化
-- **灵活配置**：支持 JSON 和控制台格式，可根据环境需求灵活切换
-- **日志级别**：支持 debug、info、warn、error、panic、fatal 多种日志级别
-- **日志轮转**：内置基于 [lumberjack](https://github.com/natefinch/lumberjack) 的日志文件轮转功能
-- **结构化日志**：支持字段化日志记录，便于日志分析和处理
-- **彩色输出**：开发环境下支持彩色日志输出，提高可读性
-
-## 实现原理
-
-Clog 基于以下原则设计：
-
-1. **封装复杂性**：对 zap 的底层 API 进行封装，提供更简洁易用的接口
-2. **灵活性与性能平衡**：在保持高性能的同时，提供足够的灵活性
-3. **多环境适应**：同时适应开发环境和生产环境的需求
-
-核心组件：
-
-- **Logger**：主要的日志记录器，封装了 zap 的功能
-- **Config**：日志配置，控制日志的行为和输出
+- 高性能：基于uber-go/zap，性能卓越
+- 灵活配置：支持JSON和控制台友好格式
+- 多环境支持：为开发、测试和生产环境提供不同配置
+- 文件轮转：基于大小、时间和备份数量的自动日志轮转
+- 多日志器管理：为不同模块创建独立日志器
+- 开发环境优化：支持自动生成带时间戳或进程ID的日志文件名
+- 结构化日志：支持字段化日志记录，方便日志分析
+- 智能颜色管理：控制台输出支持彩色，文件输出自动去除颜色代码
 
 ## 安装
 
 ```bash
-go get github.com/yourusername/clog
+go get -u github.com/ceyewan/clog
 ```
 
-## 基本用法
-
-### 初始化默认日志器
+## 快速开始
 
 ```go
 package main
 
 import (
-    "github.com/yourusername/clog"
+    "github.com/ceyewan/clog"
 )
 
 func main() {
-    // 使用默认配置初始化日志器
+    // 使用默认配置初始化日志
     err := clog.Init(clog.DefaultConfig())
     if err != nil {
         panic(err)
     }
-    
-    // 程序结束前确保日志被刷新
-    defer clog.Sync()
-    
-    // 记录日志
-    clog.Info("应用启动成功")
-    clog.Warn("这是一条警告信息")
-    clog.Error("发生错误", clog.String("reason", "配置无效"))
+    defer clog.Sync() // 程序结束时确保日志刷新
+
+    clog.Info("服务启动")
+    clog.Warn("警告信息")
+    clog.Error("错误信息")
+    clog.Debug("调试信息")
+
+    // 结构化日志
+    clog.Info("用户登录", clog.String("username", "admin"), clog.Int("user_id", 12345))
+
+    // 格式化日志
+    clog.Infof("处理了 %d 个请求", 100)
 }
 ```
 
-### 自定义配置
+---
+
+## 配置项详解
+
+`clog.Config` 支持如下配置项：
+
+| 字段名                  | 类型      | 说明                                                         | 建议/示例 |
+|------------------------|----------|--------------------------------------------------------------|-----------|
+| Level                  | string   | 日志级别：debug/info/warn/error/panic/fatal                  | `clog.DebugLevel` |
+| Format                 | string   | 日志格式：json/console                                       | `clog.FormatConsole` |
+| Filename               | string   | 日志文件路径                                                 | `./logs/app.log` |
+| Name                   | string   | 日志器名称（多日志器场景）                                   | `"order"` |
+| ConsoleOutput          | bool     | 是否同时输出到控制台                                         | true/false |
+| EnableCaller           | bool     | 是否记录调用者信息                                           | true/false |
+| EnableColor            | bool     | 控制台输出是否带颜色（文件输出自动无色）                     | true/false |
+| FileRotation           | struct   | 文件轮转配置（见下表）                                       | 见下 |
+| Environment            | string   | 运行环境 development/production/test                         | `clog.EnvProduction` |
+| UseTimeStampFilename   | bool     | 是否用时间戳命名日志文件（开发环境推荐）                     | true/false |
+| UsePidFilename         | bool     | 是否用进程ID命名日志文件（开发环境推荐）                     | true/false |
+
+**文件轮转配置（FileRotationConfig）：**
+
+| 字段名      | 类型 | 说明                   | 示例 |
+|------------|------|------------------------|------|
+| MaxSize    | int  | 单文件最大MB           | 100  |
+| MaxBackups | int  | 最多保留文件个数       | 10   |
+| MaxAge     | int  | 日志保留天数           | 7    |
+| Compress   | bool | 是否压缩轮转文件       | true |
+
+---
+
+## 方法与用法说明
+
+### 初始化与全局操作
+
+- `clog.Init(config)`：初始化全局日志器，建议程序入口调用一次。
+- `clog.Sync()`：刷新日志缓冲，建议`defer`在main函数退出前调用。
+- `clog.SetEnvironment(env)`：设置全局环境变量（影响文件名等行为）。
+- `clog.SetDefaultLevel(level)`：动态调整全局日志级别。
+
+### 日志记录方法
+
+- `clog.Debug/Info/Warn/Error/Panic/Fatal(msg, ...fields)`：结构化日志，支持任意字段。
+- `clog.Debugf/Infof/Warnf/Errorf/Panicf/Fatalf(format, ...args)`：格式化日志。
+- `clog.With(fields...)`：返回带上下文字段的新日志器。
+- `clog.WithFields(map[string]interface{})`：用map批量添加上下文字段。
+
+### 多日志器与模块日志
+
+- `clog.Module(name, ...config)`：为模块创建/获取独立日志器，可单独配置。
+- `clog.GetLogger(name)`：获取已注册的日志器。
+- `logger.SetLevel(level)`：动态调整某个日志器级别。
+- `logger.With(fields...)`：为某个日志器添加上下文字段。
+- `logger.Sync()`：刷新该日志器缓冲。
+- `logger.Close()`：关闭日志器（如需释放资源）。
+
+### 字段构造器
+
+- `clog.String(key, val)`、`clog.Int(key, val)`、`clog.Bool(key, val)`、`clog.Float64(key, val)`、`clog.Time(key, val)`、`clog.Err(err)` 等，便于结构化日志。
+
+---
+
+## 高级用法与实战示例
+
+### 1. 自定义配置
 
 ```go
-config := clog.Config{
-    Level:         clog.InfoLevel,
-    Format:        clog.FormatJSON,      // 使用JSON格式，适合生产环境
-    Filename:      "./logs/app.log",
-    ConsoleOutput: true,                 // 同时输出到控制台
-    EnableCaller:  true,                 // 记录调用者信息
-    EnableColor:   false,                // 在JSON模式下颜色无效
-    FileRotation: &clog.FileRotationConfig{
-        MaxSize:    100,                 // 单个文件最大100MB
-        MaxAge:     7,                   // 保留7天
-        MaxBackups: 10,                  // 最多保留10个备份
-        Compress:   true,                // 压缩旧文件
-    },
-}
-
-err := clog.Init(config)
+config := clog.DefaultConfig()
+config.Level = clog.DebugLevel
+config.Format = clog.FormatJSON
+config.Filename = "./logs/myapp.log"
+config.ConsoleOutput = true
+config.EnableCaller = true
+config.EnableColor = true
+clog.Init(config)
 ```
 
-### 结构化日志
+### 2. 环境区分与文件名自动化
 
 ```go
-// 使用预定义的字段构造函数
-clog.Info("用户登录", 
-    clog.String("username", "admin"),
-    clog.Int("user_id", 10001),
-    clog.Bool("is_admin", true),
-)
-
-// 添加错误信息
-err := doSomething()
-if err != nil {
-    clog.Error("操作失败", clog.Err(err))
+clog.SetEnvironment(clog.EnvProduction)
+config := clog.DefaultConfig()
+config.Format = clog.FormatJSON
+config.ConsoleOutput = false
+config.EnableColor = false
+if clog.GetEnvironment() == clog.EnvDevelopment {
+    config.UseTimeStampFilename = true
+    config.UsePidFilename = true
 }
+clog.Init(config)
+```
 
-// 使用WithFields添加固定上下文
-logger := clog.WithFields(map[string]interface{}{
-    "module": "user_service",
-    "version": "1.0.0",
+### 3. 多模块日志与独立级别
+
+```go
+userLogger := clog.Module("user")
+orderLogger := clog.Module("order", clog.Config{
+    Level: clog.DebugLevel,
+    Filename: "./logs/order.log",
 })
-logger.Info("服务初始化")
+userLogger.Info("用户已登录", clog.String("username", "admin"))
+orderLogger.Debug("订单调试", clog.Int("order_id", 10086))
+orderLogger.SetLevel(clog.ErrorLevel) // 动态调整模块日志级别
 ```
 
-### 动态调整日志级别
+### 4. 结构化与上下文日志
 
 ```go
-// 全局调整默认日志器的级别
-clog.SetDefaultLevel(clog.DebugLevel)
-
-// 对特定日志器实例调整级别
-logger := clog.NewLogger(config)
-logger.SetLevel(clog.WarnLevel)
+reqLogger := clog.With(
+    clog.String("request_id", "req-123"),
+    clog.String("user_agent", "Mozilla/5.0..."),
+)
+reqLogger.Info("处理请求开始")
+reqLogger.Error("处理请求失败", clog.Err(err))
+fields := map[string]interface{}{
+    "request_id": "req-123",
+    "ip": "192.168.1.1",
+}
+clog.WithFields(fields).Warn("批量字段日志")
 ```
+
+### 5. 日志轮转与压缩
+
+```go
+config := clog.DefaultConfig()
+config.FileRotation = &clog.FileRotationConfig{
+    MaxSize:    100,    // 单个文件最大尺寸，单位MB
+    MaxAge:     7,      // 保留天数
+    MaxBackups: 10,     // 最多保留文件个数
+    Compress:   true,   // 是否压缩轮转文件
+}
+clog.Init(config)
+```
+
+---
+
+## 常见问题与解答（FAQ）
+
+**Q: 为什么日志文件有颜色代码？**
+A: clog 智能区分输出目标，文件输出自动去除颜色，仅控制台可彩色显示。
+
+**Q: 如何只输出到文件/控制台？**
+A: 设置 `ConsoleOutput` 为 `false` 只输出到文件，为 `true` 则同时输出到控制台。
+
+**Q: 如何为不同模块设置不同日志级别？**
+A: 用 `clog.Module("模块名", clog.Config{Level: clog.DebugLevel})` 创建模块日志器并单独设置级别。
+
+**Q: 如何让日志文件名带时间戳或进程ID？**
+A: 在开发环境下设置 `UseTimeStampFilename` 或 `UsePidFilename` 为 `true`。
+
+**Q: 如何保证日志全部写入磁盘？**
+A: 程序退出前调用 `clog.Sync()` 或 `clog.SyncAll()`。
+
+**Q: 如何记录结构化错误？**
+A: 用 `clog.Err(err)` 字段，便于后续检索和分析。
+
+---
+
+## 最佳实践
+
+1. **生产环境**：
+   - 推荐 `FormatJSON`，禁用控制台输出和颜色，开启压缩和轮转。
+2. **开发环境**：
+   - 推荐 `FormatConsole`，启用颜色和控制台输出，文件名带时间戳/进程ID。
+3. **多模块管理**：
+   - 每个主要模块用 `clog.Module` 独立日志器，便于分级和定位。
+4. **结构化日志**：
+   - 用字段而非字符串拼接，关键操作统一字段名，错误日志用 `clog.Err(err)`。
+5. **高并发/高性能**：
+   - 复用日志器，避免频繁创建临时日志器。
+6. **日志刷新**：
+   - 程序退出前务必 `defer clog.Sync()` 或 `defer clog.SyncAll()`。
+
+---
 
 ## 性能考虑
 
-- 对于性能敏感的应用，建议在生产环境使用 JSON 格式
-- 使用字段化日志而非格式化字符串（如 `Info()` 而非 `Infof()`）可获得更好的性能
-- 避免在热路径中创建临时 logger 实例
+`clog` 基于高性能的 zap 库，但在以下情况可能影响性能：
 
-## 扩展
+- 大量使用 `Debugf`, `Infof` 等格式化函数比直接使用字段开销更大
+- 频繁创建临时日志器（如每个请求创建）会有额外开销
+- 在高并发场景，建议复用日志器而不是频繁创建
 
-Clog 设计为可扩展的，您可以：
-
-- 使用 `GetZapLogger()` 获取底层 zap.Logger 实例
-- 创建自定义的日志适配器扩展功能
-- 实现自己的输出格式和目标
+---
 
 ## 许可证
 
-MIT
-
-## 致谢
-
-Clog 基于以下出色的开源项目：
-
-- [uber-go/zap](https://github.com/uber-go/zap) - 高性能日志库
-- [natefinch/lumberjack](https://github.com/natefinch/lumberjack) - 日志轮转功能
+[MIT](LICENSE)
