@@ -1,5 +1,5 @@
 // Package clog 提供一个灵活的日志系统，基于 uber-go/zap
-// 支持结构化日志、多环境配置、多日志器管理和日志文件轮转
+// 支持结构化日志和多日志器管理
 package clog
 
 import (
@@ -21,7 +21,6 @@ const (
 	InfoLevel  = "info"  // 信息级别日志
 	WarnLevel  = "warn"  // 警告级别日志
 	ErrorLevel = "error" // 错误级别日志
-	PanicLevel = "panic" // 会触发panic的日志级别
 	FatalLevel = "fatal" // 会导致程序退出的日志级别
 )
 
@@ -30,16 +29,6 @@ const (
 	FormatJSON    = "json"    // JSON格式输出，适合生产环境
 	FormatConsole = "console" // 控制台友好格式，适合开发环境
 )
-
-// 运行环境类型定义
-const (
-	EnvDevelopment = "development" // 开发环境
-	EnvProduction  = "production"  // 生产环境
-	EnvTest        = "test"        // 测试环境
-)
-
-// 默认运行环境
-var currentEnv = EnvDevelopment
 
 // 全局默认日志实例
 var defaultLogger *Logger
@@ -50,19 +39,25 @@ var (
 	loggersMu sync.RWMutex
 )
 
+// 全局共享的日志文件写入器
+var (
+	// 全局共享的日志文件写入器，确保所有模块日志都写入同一文件
+	globalFileWriter zapcore.WriteSyncer
+	globalFilename   string
+	globalRotator    *lumberjack.Logger
+	fileWriterOnce   sync.Once
+)
+
 // Config 定义日志配置选项
 type Config struct {
-	Level                string              `json:"level"`                  // 日志级别
-	Format               string              `json:"format"`                 // 日志格式
-	Filename             string              `json:"filename"`               // 日志文件路径
-	Name                 string              `json:"name"`                   // 日志器名称
-	ConsoleOutput        bool                `json:"console_output"`         // 是否同时输出到控制台
-	EnableCaller         bool                `json:"enable_caller"`          // 是否记录调用者信息
-	EnableColor          bool                `json:"enable_color"`           // 是否启用颜色
-	FileRotation         *FileRotationConfig `json:"file_rotation"`          // 文件轮转配置
-	Environment          string              `json:"environment"`            // 运行环境
-	UseTimeStampFilename bool                `json:"use_timestamp_filename"` // 是否使用时间戳文件名
-	UsePidFilename       bool                `json:"use_pid_filename"`       // 是否在文件名中包含进程ID
+	Level         string              `json:"level"`          // 日志级别
+	Format        string              `json:"format"`         // 日志格式
+	Filename      string              `json:"filename"`       // 日志文件名
+	Name          string              `json:"name"`           // 日志器名称
+	ConsoleOutput bool                `json:"console_output"` // 是否同时输出到控制台
+	EnableCaller  bool                `json:"enable_caller"`  // 是否记录调用者信息
+	EnableColor   bool                `json:"enable_color"`   // 是否启用颜色
+	FileRotation  *FileRotationConfig `json:"file_rotation"`  // 文件轮转配置
 }
 
 // FileRotationConfig 定义日志文件轮转设置
@@ -88,6 +83,7 @@ type Field = zap.Field
 // 提供常用字段类型的创建函数
 var (
 	String   = zap.String   // 创建字符串类型的日志字段
+	Uint64   = zap.Uint64   // 创建无符号整数类型的日志字段
 	Int      = zap.Int      // 创建整数类型的日志字段
 	Int64    = zap.Int64    // 创建64位整数类型的日志字段
 	Float64  = zap.Float64  // 创建浮点数类型的日志字段
@@ -101,16 +97,13 @@ var (
 // DefaultConfig 返回默认的日志配置
 func DefaultConfig() Config {
 	return Config{
-		Level:                InfoLevel,
-		Format:               FormatConsole,
-		Filename:             "./logs/app.log",
-		Name:                 "default",
-		ConsoleOutput:        false,
-		EnableCaller:         true,
-		EnableColor:          true,
-		Environment:          currentEnv,
-		UseTimeStampFilename: false,
-		UsePidFilename:       false,
+		Level:         InfoLevel,
+		Format:        FormatConsole,
+		Filename:      "logs/app.log", // 默认日志文件路径
+		Name:          "default",
+		ConsoleOutput: false,
+		EnableCaller:  true,
+		EnableColor:   true,
 		FileRotation: &FileRotationConfig{
 			MaxSize:    100,
 			MaxAge:     7,
@@ -120,19 +113,14 @@ func DefaultConfig() Config {
 	}
 }
 
-// SetEnvironment 设置全局运行环境
-func SetEnvironment(env string) {
-	currentEnv = env
-}
-
-// GetEnvironment 获取当前运行环境
-func GetEnvironment() string {
-	return currentEnv
-}
-
 // Init 初始化默认日志器实例
 // 使用提供的配置来创建全局默认日志器
 func Init(config Config) error {
+	// 确保默认日志器名称为 "default"
+	if config.Name == "" {
+		config.Name = "default"
+	}
+
 	logger, err := NewLogger(config)
 	if err != nil {
 		return err
@@ -160,9 +148,28 @@ func NewLogger(config Config) (*Logger, error) {
 	// 创建编码器配置
 	encoderConfig := createEncoderConfig(config)
 
-	// 准备日志写入器
-	finalFilename := getLogFilename(config)
-	fileWriter, rotator, err := createLogWriter(finalFilename, config)
+	var fileWriter zapcore.WriteSyncer
+	var rotator *lumberjack.Logger
+	var err error
+
+	// 使用共享的全局日志写入器（如果是默认日志器或有意共享）
+	if config.Name == "default" || (defaultLogger != nil && globalFileWriter != nil) {
+		fileWriterOnce.Do(func() {
+			// 只有第一次创建时才生成文件名和写入器
+			if globalFileWriter == nil {
+				finalFilename := getLogFilename(config)
+				globalFilename = finalFilename
+				globalFileWriter, rotator, err = createLogWriter(finalFilename, config)
+			}
+		})
+
+		fileWriter = globalFileWriter
+	} else {
+		// 单独的模块日志器使用独立的文件（这种情况不应该发生）
+		finalFilename := getLogFilename(config)
+		fileWriter, rotator, err = createLogWriter(finalFilename, config)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -229,9 +236,6 @@ func fillDefaultConfig(config Config) Config {
 	if config.Name == "" {
 		config.Name = defaultCfg.Name
 	}
-	if config.Environment == "" {
-		config.Environment = defaultCfg.Environment
-	}
 
 	// 填充文件轮转配置
 	if config.FileRotation == nil {
@@ -256,6 +260,7 @@ func createEncoderConfig(config Config) zapcore.EncoderConfig {
 	encoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
+		NameKey:        "module", // 添加模块名称字段
 		CallerKey:      "caller",
 		MessageKey:     "msg",
 		StacktraceKey:  "stacktrace",
@@ -275,6 +280,15 @@ func createEncoderConfig(config Config) zapcore.EncoderConfig {
 		}
 	}
 
+	// 自定义模块名称的编码 - 适用于所有格式
+	encoderConfig.EncodeName = func(name string, enc zapcore.PrimitiveArrayEncoder) {
+		if name != "" {
+			enc.AppendString(name)
+		} else {
+			enc.AppendString("default")
+		}
+	}
+
 	// 自定义时间格式
 	encoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		enc.AppendString(t.Format("2006-01-02 15:04:05.000"))
@@ -284,7 +298,6 @@ func createEncoderConfig(config Config) zapcore.EncoderConfig {
 }
 
 // createLogWriter 创建日志文件写入器
-// 注意: 如果配置了 ConsoleOutput 为 true，控制台输出会在 NewLogger 函数中单独处理
 func createLogWriter(filename string, config Config) (zapcore.WriteSyncer, *lumberjack.Logger, error) {
 	// 确保日志目录存在
 	dir := filepath.Dir(filename)
@@ -302,7 +315,6 @@ func createLogWriter(filename string, config Config) (zapcore.WriteSyncer, *lumb
 	}
 	writer := zapcore.AddSync(rotator)
 
-	// 不再在这里添加控制台输出，移到了 NewLogger 函数中
 	return writer, rotator, nil
 }
 
@@ -318,7 +330,14 @@ func createEncoder(config Config, encoderConfig zapcore.EncoderConfig) zapcore.E
 func createZapLogger(core zapcore.Core, config Config) *zap.Logger {
 	var zapLogger *zap.Logger
 	if config.EnableCaller {
-		zapLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(2))
+		// 为不同类型的日志器调整 CallerSkip
+		// 默认日志器使用 2，模块日志器使用 1
+		callerSkip := 2
+		// 如果是命名模块，使用不同的 CallerSkip 值
+		if config.Name != "default" && config.Name != "" {
+			callerSkip = 1
+		}
+		zapLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(callerSkip))
 	} else {
 		zapLogger = zap.New(core)
 	}
@@ -333,7 +352,7 @@ func createZapLogger(core zapcore.Core, config Config) *zap.Logger {
 
 // registerLogger 注册日志器到全局映射表
 func registerLogger(logger *Logger, name string) {
-	if name != "" && name != "default" {
+	if name != "" {
 		loggersMu.Lock()
 		loggers[name] = logger
 		loggersMu.Unlock()
@@ -351,8 +370,6 @@ func parseLevel(level string) zapcore.Level {
 		return zapcore.WarnLevel
 	case ErrorLevel:
 		return zapcore.ErrorLevel
-	case PanicLevel:
-		return zapcore.PanicLevel
 	case FatalLevel:
 		return zapcore.FatalLevel
 	default:
@@ -360,33 +377,18 @@ func parseLevel(level string) zapcore.Level {
 	}
 }
 
-// getLogFilename 根据配置生成日志文件名
+// getLogFilename 根据配置生成日志文件名 app-[timestamp].log
 func getLogFilename(config Config) string {
-	// 如果不是开发环境或没有启用特殊文件名，直接返回配置的文件名
-	if config.Environment != EnvDevelopment || (!config.UseTimeStampFilename && !config.UsePidFilename) {
-		return config.Filename
-	}
-
 	// 解析文件路径
 	dir := filepath.Dir(config.Filename)
 	ext := filepath.Ext(config.Filename)
-	base := filepath.Base(config.Filename)
-	name := strings.TrimSuffix(base, ext)
 
-	// 生成文件名
-	var filename string
-	if config.UseTimeStampFilename {
-		timestamp := time.Now().Format("20060102_150405")
-		filename = fmt.Sprintf("%s_%s", name, timestamp)
-	} else {
-		filename = name
-	}
+	// 使用通用的app前缀，确保所有模块都输出到同一个文件
+	name := "app"
 
-	// 加入进程ID
-	if config.UsePidFilename {
-		pid := os.Getpid()
-		filename = fmt.Sprintf("%s_pid%d", filename, pid)
-	}
+	// 组装文件名：app-[timestamp]
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s-%s", name, timestamp)
 
 	return filepath.Join(dir, filename+ext)
 }
@@ -418,19 +420,42 @@ func Module(moduleName string, config ...Config) *Logger {
 
 	// 准备配置
 	var cfg Config
+	defaultCfg := DefaultConfig()
+
 	if len(config) > 0 {
 		cfg = config[0]
+		// 确保继承默认配置中的某些设置，除非被明确覆盖
+		if !cfg.EnableCaller && defaultCfg.EnableCaller {
+			cfg.EnableCaller = true
+		}
+		// 继承控制台输出设置
+		if !cfg.ConsoleOutput && defaultLogger != nil {
+			cfg.ConsoleOutput = defaultLogger.config.ConsoleOutput
+		}
 	} else {
 		cfg = DefaultConfig()
+		// 如果存在默认日志器，从其继承控制台输出设置
+		if defaultLogger != nil {
+			cfg.ConsoleOutput = defaultLogger.config.ConsoleOutput
+		}
 	}
 
-	// 设置模块名
+	// 确保模块名称被正确设置
 	cfg.Name = moduleName
 
-	// 使用模块名作为日志文件名
-	if cfg.Filename == "" || cfg.Filename == DefaultConfig().Filename {
-		dir := "./logs"
-		cfg.Filename = filepath.Join(dir, moduleName+".log")
+	// 使用默认日志器的文件路径
+	// 确保所有模块都写入同一个日志文件
+	if defaultLogger != nil {
+		// 使用默认日志器的实际文件路径
+		cfg.Filename = defaultLogger.config.Filename
+	} else {
+		// 备用方案：使用默认配置中的文件路径
+		cfg.Filename = defaultCfg.Filename
+	}
+
+	// 确保总是使用共享的日志文件写入器
+	if globalFilename != "" {
+		cfg.Filename = globalFilename
 	}
 
 	// 创建日志器
@@ -457,27 +482,6 @@ func (l *Logger) SetLevel(level string) {
 	l.atomicLevel.SetLevel(parseLevel(level))
 }
 
-// With 添加结构化上下文到日志器
-func (l *Logger) With(fields ...zapcore.Field) *Logger {
-	newZap := l.zap.With(fields...)
-	return &Logger{
-		zap:         newZap,
-		sugar:       newZap.Sugar(),
-		config:      l.config,
-		atomicLevel: l.atomicLevel,
-		rotator:     l.rotator,
-	}
-}
-
-// WithFields 使用键值对添加结构化上下文到日志器
-func (l *Logger) WithFields(fields map[string]interface{}) *Logger {
-	var zapFields []zap.Field
-	for k, v := range fields {
-		zapFields = append(zapFields, zap.Any(k, v))
-	}
-	return l.With(zapFields...)
-}
-
 // Debug 在 debug 级别记录消息
 func (l *Logger) Debug(msg string, fields ...zapcore.Field) {
 	l.zap.Debug(msg, fields...)
@@ -496,11 +500,6 @@ func (l *Logger) Warn(msg string, fields ...zapcore.Field) {
 // Error 在 error 级别记录消息
 func (l *Logger) Error(msg string, fields ...zapcore.Field) {
 	l.zap.Error(msg, fields...)
-}
-
-// Panic 在 panic 级别记录消息然后触发 panic
-func (l *Logger) Panic(msg string, fields ...zapcore.Field) {
-	l.zap.Panic(msg, fields...)
 }
 
 // Fatal 在 fatal 级别记录消息然后调用 os.Exit(1)
@@ -528,11 +527,6 @@ func (l *Logger) Errorf(format string, args ...interface{}) {
 	l.sugar.Errorf(format, args...)
 }
 
-// Panicf 记录格式化的 panic 级别消息然后触发 panic
-func (l *Logger) Panicf(format string, args ...interface{}) {
-	l.sugar.Panicf(format, args...)
-}
-
 // Fatalf 记录格式化的 fatal 级别消息然后调用 os.Exit(1)
 func (l *Logger) Fatalf(format string, args ...interface{}) {
 	l.sugar.Fatalf(format, args...)
@@ -546,16 +540,6 @@ func (l *Logger) Sync() error {
 // Close 正确关闭日志器
 func (l *Logger) Close() error {
 	return l.Sync()
-}
-
-// GetZapLogger 获取底层的 zap.Logger
-func (l *Logger) GetZapLogger() *zap.Logger {
-	return l.zap
-}
-
-// GetSugarLogger 获取底层的 zap.SugaredLogger
-func (l *Logger) GetSugarLogger() *zap.SugaredLogger {
-	return l.sugar
 }
 
 //
@@ -597,13 +581,6 @@ func Error(msg string, fields ...zapcore.Field) {
 	}
 }
 
-// Panic 使用默认日志器记录 panic 级别消息然后触发 panic
-func Panic(msg string, fields ...zapcore.Field) {
-	if defaultLogger != nil {
-		defaultLogger.Panic(msg, fields...)
-	}
-}
-
 // Fatal 使用默认日志器记录 fatal 级别消息然后退出
 func Fatal(msg string, fields ...zapcore.Field) {
 	if defaultLogger != nil {
@@ -639,34 +616,11 @@ func Errorf(format string, args ...interface{}) {
 	}
 }
 
-// Panicf 使用默认日志器记录格式化的 panic 级别消息然后触发 panic
-func Panicf(format string, args ...interface{}) {
-	if defaultLogger != nil {
-		defaultLogger.Panicf(format, args...)
-	}
-}
-
 // Fatalf 使用默认日志器记录格式化的 fatal 级别消息然后退出
 func Fatalf(format string, args ...interface{}) {
 	if defaultLogger != nil {
 		defaultLogger.Fatalf(format, args...)
 	}
-}
-
-// With 添加结构化上下文到默认日志器
-func With(fields ...zapcore.Field) *Logger {
-	if defaultLogger != nil {
-		return defaultLogger.With(fields...)
-	}
-	return nil
-}
-
-// WithFields 使用键值对添加结构化上下文到默认日志器
-func WithFields(fields map[string]interface{}) *Logger {
-	if defaultLogger != nil {
-		return defaultLogger.WithFields(fields)
-	}
-	return nil
 }
 
 // Sync 刷新默认日志器中任何缓冲的日志条目

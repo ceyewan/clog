@@ -1,0 +1,9 @@
+2025-05-17 14:56:03.157	INFO	default	example/main.go:24	程序启动
+2025-05-17 14:56:03.157	WARN	default	example/main.go:26	这是一条警告信息
+2025-05-17 14:56:03.157	INFO	default	example/main.go:29	用户登录	{"username": "admin", "user_id": 1001, "is_admin": true, "login_time": "2025-05-17 14:56:03.157"}
+2025-05-17 14:56:03.157	INFO	default	example/main.go:37	处理了 100 个请求，耗时 0.12 秒
+2025-05-17 14:56:03.157	ERROR	default	example/main.go:41	操作失败	{"error": "数据库连接失败"}
+2025-05-17 14:56:03.157	INFO	default	example/main.go:58	当前日志级别为 INFO
+2025-05-17 14:56:03.157	INFO	default	example/main.go:62	日志级别已改为 DEBUG
+2025-05-17 14:56:03.157	DEBUG	default	example/main.go:63	这条调试日志现在可以看到了
+2025-05-17 14:56:03.157	INFO	default	example/main.go:65	程序运行完毕
