@@ -40,19 +40,10 @@ func main() {
 	err = errors.New("数据库连接失败")
 	clog.Error("操作失败", clog.Err(err))
 
-	// 使用With添加上下文
-	reqLogger := clog.With(
-		clog.String("request_id", "req-12345"),
-		clog.String("client_ip", "192.168.1.1"),
-	)
-	reqLogger.Info("开始处理请求")
-	reqLogger.Info("请求处理完成", clog.Int("status", 200))
-
 	// 为不同模块创建日志器
 	userLogger := clog.Module("user")
 	orderLogger := clog.Module("order", clog.Config{
-		Level:    clog.DebugLevel,
-		Filename: "./logs/order.log",
+		Level: clog.DebugLevel,
 	})
 
 	// 使用模块日志器

@@ -4,14 +4,21 @@
 
 ## 特性
 
-- 高性能：基于uber-go/zap，性能卓越
-- 灵活配置：支持JSON和控制台友好格式
-- 多环境支持：为开发、测试和生产环境提供不同配置
-- 文件轮转：基于大小、时间和备份数量的自动日志轮转
-- 多日志器管理：为不同模块创建独立日志器
-- 开发环境优化：支持自动生成带时间戳或进程ID的日志文件名
-- 结构化日志：支持字段化日志记录，方便日志分析
-- 智能颜色管理：控制台输出支持彩色，文件输出自动去除颜色代码
+- **高性能**：基于uber-go/zap，性能卓越
+- **结构化日志**：支持字段化记录，便于分析与检索
+- **多环境支持**：为开发、测试和生产环境提供不同配置
+- **模块化日志**：为不同模块创建独立日志器，共享同一日志文件
+- **智能文件管理**：
+  - 自动创建日志目录
+  - 文件名中包含时间戳
+  - 基于大小、时间和备份数量的日志文件轮转
+- **易于使用**：
+  - 简洁API设计
+  - 支持全局和模块级别日志控制
+  - 同时支持结构化和格式化日志记录
+- **灵活配置**：支持JSON格式（适用于生产环境）和友好控制台格式（适用于开发）
+- **调用者追踪**：可选择性地记录调用位置
+- **彩色日志**：控制台输出支持彩色，文件输出自动去除颜色代码
 
 ## 安装
 
@@ -30,22 +37,51 @@ import (
 
 func main() {
     // 使用默认配置初始化日志
-    err := clog.Init(clog.DefaultConfig())
+    config := clog.DefaultConfig()
+    config.ConsoleOutput = true // 同时输出到控制台
+    
+    err := clog.Init(config)
     if err != nil {
         panic(err)
     }
     defer clog.Sync() // 程序结束时确保日志刷新
 
+    // 记录不同级别的日志
     clog.Info("服务启动")
     clog.Warn("警告信息")
     clog.Error("错误信息")
-    clog.Debug("调试信息")
+    
+    // 结构化日志 - 添加字段
+    clog.Info("用户登录", 
+        clog.String("username", "admin"), 
+        clog.Int("user_id", 12345),
+        clog.Bool("is_admin", true),
+    )
 
-    // 结构化日志
-    clog.Info("用户登录", clog.String("username", "admin"), clog.Int("user_id", 12345))
+    // 格式化日志 - 类似Printf
+    clog.Infof("处理了 %d 个请求，平均耗时 %.2fms", 100, 12.34)
+    
+    // 错误日志记录
+    err = doSomething()
+    if err != nil {
+        clog.Error("操作失败", clog.Err(err))
+    }
+    
+    // 创建模块日志器
+    userLogger := clog.Module("user")
+    orderLogger := clog.Module("order")
+    
+    // 使用模块日志器
+    userLogger.Info("用户模块初始化完成")
+    orderLogger.Debug("订单详情", 
+        clog.Int("order_id", 10086),
+        clog.Float64("amount", 99.99),
+    )
+}
 
-    // 格式化日志
-    clog.Infof("处理了 %d 个请求", 100)
+func doSomething() error {
+    // 示例函数
+    return nil
 }
 ```
 
@@ -55,28 +91,25 @@ func main() {
 
 `clog.Config` 支持如下配置项：
 
-| 字段名                  | 类型      | 说明                                                         | 建议/示例 |
-|------------------------|----------|--------------------------------------------------------------|-----------|
-| Level                  | string   | 日志级别：debug/info/warn/error/panic/fatal                  | `clog.DebugLevel` |
-| Format                 | string   | 日志格式：json/console                                       | `clog.FormatConsole` |
-| Filename               | string   | 日志文件路径                                                 | `./logs/app.log` |
-| Name                   | string   | 日志器名称（多日志器场景）                                   | `"order"` |
-| ConsoleOutput          | bool     | 是否同时输出到控制台                                         | true/false |
-| EnableCaller           | bool     | 是否记录调用者信息                                           | true/false |
-| EnableColor            | bool     | 控制台输出是否带颜色（文件输出自动无色）                     | true/false |
-| FileRotation           | struct   | 文件轮转配置（见下表）                                       | 见下 |
-| Environment            | string   | 运行环境 development/production/test                         | `clog.EnvProduction` |
-| UseTimeStampFilename   | bool     | 是否用时间戳命名日志文件（开发环境推荐）                     | true/false |
-| UsePidFilename         | bool     | 是否用进程ID命名日志文件（开发环境推荐）                     | true/false |
+| 字段名         | 类型                | 说明                                      | 默认值              |
+|---------------|-------------------|------------------------------------------|-------------------|
+| Level         | string            | 日志级别：debug/info/warn/error/fatal      | info             |
+| Format        | string            | 日志格式：json/console                      | console          |
+| Filename      | string            | 日志文件路径                                | logs/app.log     |
+| Name          | string            | 日志器名称（多日志器场景）                     | default          |
+| ConsoleOutput | bool              | 是否同时输出到控制台                         | false            |
+| EnableCaller  | bool              | 是否记录调用者信息                           | true             |
+| EnableColor   | bool              | 控制台输出是否带颜色                         | true             |
+| FileRotation  | FileRotationConfig| 文件轮转配置                               | 见下              |
 
 **文件轮转配置（FileRotationConfig）：**
 
-| 字段名      | 类型 | 说明                   | 示例 |
-|------------|------|------------------------|------|
-| MaxSize    | int  | 单文件最大MB           | 100  |
-| MaxBackups | int  | 最多保留文件个数       | 10   |
-| MaxAge     | int  | 日志保留天数           | 7    |
-| Compress   | bool | 是否压缩轮转文件       | true |
+| 字段名      | 类型  | 说明                   | 默认值 |
+|------------|------|------------------------|-------|
+| MaxSize    | int  | 单文件最大MB (单位：MB)  | 100   |
+| MaxBackups | int  | 最多保留文件个数         | 10    |
+| MaxAge     | int  | 日志保留天数            | 7     |
+| Compress   | bool | 是否压缩轮转文件         | false |
 
 ---
 
