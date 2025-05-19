@@ -432,6 +432,12 @@ func Module(moduleName string, config ...Config) *Logger {
 		if !cfg.ConsoleOutput && defaultLogger != nil {
 			cfg.ConsoleOutput = defaultLogger.config.ConsoleOutput
 		}
+		// 继承颜色设置
+		if defaultLogger != nil {
+			cfg.EnableColor = defaultLogger.config.EnableColor
+		} else {
+			cfg.EnableColor = defaultCfg.EnableColor
+		}
 	} else {
 		cfg = DefaultConfig()
 		// 如果存在默认日志器，从其继承控制台输出设置
